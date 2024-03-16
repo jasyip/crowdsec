@@ -2,7 +2,7 @@
 FROM golang:1.21.7-alpine3.18 AS build
 
 ARG BUILD_VERSION
-ARG YQ_VERSION=
+ARG YQ_VERSION=4.42.1
 
 WORKDIR /go/src/crowdsec
 
