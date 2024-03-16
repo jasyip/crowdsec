@@ -2,6 +2,7 @@
 FROM golang:1.21.7-alpine3.18 AS build
 
 ARG BUILD_VERSION
+ARG YQ_VERSION=
 
 WORKDIR /go/src/crowdsec
 
@@ -11,12 +12,14 @@ ENV BUILD_VERSION=${BUILD_VERSION}
 
 # wizard.sh requires GNU coreutils
 RUN apk add --no-cache git g++ gcc libc-dev make bash gettext binutils-gold coreutils pkgconfig && \
-    wget https://github.com/google/re2/archive/refs/tags/${RE2_VERSION}.tar.gz && \
-    tar -xzf ${RE2_VERSION}.tar.gz && \
+    wget -qO - https://github.com/google/re2/archive/refs/tags/${RE2_VERSION}.tar.gz | \
+        tar -xzf - && \
     cd re2-${RE2_VERSION} && \
     make install && \
     echo "githubciXXXXXXXXXXXXXXXXXXXXXXXX" > /etc/machine-id && \
-    go install github.com/mikefarah/yq/v4@v4.40.4
+    cd .. && \
+    wget -qO - "https://github.com/mikefarah/yq/archive/refs/tags/v${YQ_VERSION}.tar.gz" | \
+        tar -xzf - --strip-components 1 && CGO_ENABLED=0 go build -o /yq -ldflags=-extldflags=-static .
 
 COPY . .
 
@@ -31,21 +34,25 @@ RUN make clean release DOCKER_BUILD=1 BUILD_STATIC=1 && \
     # In case we need to remove agents here..
     # cscli machines list -o json | yq '.[].machineId' | xargs -r cscli machines delete
 
-FROM alpine:latest as slim
+FROM gcr.io/distroless/static-debian12:debug-nonroot as slim
 
-RUN apk add --no-cache --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community tzdata bash rsync && \
-    mkdir -p /staging/etc/crowdsec && \
-    mkdir -p /staging/etc/crowdsec/acquis.d && \
-    mkdir -p /staging/var/lib/crowdsec && \
-    mkdir -p /var/lib/crowdsec/data
+SHELL ["/busybox/sh", "-c"]
+USER root
 
-COPY --from=build /go/bin/yq /usr/local/bin/crowdsec /usr/local/bin/cscli /usr/local/bin/
-COPY --from=build /etc/crowdsec /staging/etc/crowdsec
-COPY --from=build /go/src/crowdsec/docker/docker_start.sh /
-COPY --from=build /go/src/crowdsec/docker/config.yaml /staging/etc/crowdsec/config.yaml
-RUN yq -n '.url="http://0.0.0.0:8080"' | install -m 0600 /dev/stdin /staging/etc/crowdsec/local_api_credentials.yaml
+RUN install -o nonroot -g nonroot -m755 -d /staging/etc/crowdsec \
+                                           /staging/etc/crowdsec/acquis.d \
+                                           /staging/var/lib/crowdsec \
+                                           /var/lib/crowdsec/data
 
-ENTRYPOINT /bin/bash /docker_start.sh
+COPY --from=build /yq /usr/local/bin/crowdsec /usr/local/bin/cscli /usr/local/bin/
+USER nonroot
+COPY --from=build --chown=nonroot:nonroot /etc/crowdsec /staging/etc/crowdsec
+COPY --from=build --chown=nonroot:nonroot /go/src/crowdsec/docker/docker_start.sh /
+COPY --from=build --chown=nonroot:nonroot /go/src/crowdsec/docker/config.yaml /staging/etc/crowdsec/config.yaml
+RUN yq -n '.url="http://0.0.0.0:8080"' | install -m600 -o nonroot -g nonroot /dev/stdin /staging/etc/crowdsec/local_api_credentials.yaml
+
+HEALTHCHECK CMD wget -q --spider localhost:8080/health || exit 1
+ENTRYPOINT ["sh", "/docker_start.sh"]
 
 FROM slim as plugins
 

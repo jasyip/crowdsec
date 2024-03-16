@@ -1,10 +1,4 @@
-#!/bin/bash
-
-# shellcheck disable=SC2292      # allow [ test ] syntax
-# shellcheck disable=SC2310      # allow "if function..." syntax with -e
-
 set -e
-shopt -s inherit_errexit
 
 # match true, TRUE, True, tRuE, etc.
 istrue() {
@@ -79,7 +73,7 @@ conf_set() {
 # only if a given variable is provided
 # conf_set_if "$VAR" <yq_expression> [file_path]
 conf_set_if() {
-    if [ "$1" != "" ]; then
+    if [ -n "$1" ]; then
         shift
         conf_set "$@"
     fi
@@ -101,9 +95,9 @@ register_bouncer() {
 # $2 can be install, remove, upgrade
 # $3 is a list of object names separated by space
 cscli_if_clean() {
-    local itemtype="$1"
-    local action="$2"
-    local objs=$3
+    itemtype="$1"
+    action="$2"
+    objs="$3"
     shift 3
     # loop over all objects
     for obj in $objs; do
@@ -155,8 +149,8 @@ if [ -n "$CERT_FILE" ] || [ -n "$KEY_FILE" ] ; then
     echo "Please use LAPI_CERT_FILE and LAPI_KEY_FILE insted." >&2
     echo "The old variables will be removed in a future release." >&2
     printf '%b' '\033[0m'
-    export LAPI_CERT_FILE=${LAPI_CERT_FILE:-$CERT_FILE}
-    export LAPI_KEY_FILE=${LAPI_KEY_FILE:-$KEY_FILE}
+    export LAPI_CERT_FILE="${LAPI_CERT_FILE:-$CERT_FILE}"
+    export LAPI_KEY_FILE="${LAPI_KEY_FILE:-$KEY_FILE}"
 fi
 
 # Check and prestage databases
@@ -171,6 +165,7 @@ for geodb in GeoLite2-ASN.mmdb GeoLite2-City.mmdb; do
     fi
 done
 
+
 # Check and prestage /etc/crowdsec
 if [ ! -e "/etc/crowdsec/local_api_credentials.yaml" ] && [ ! -e "/etc/crowdsec/config.yaml" ]; then
     echo "Populating configuration directory..."
@@ -180,7 +175,7 @@ if [ ! -e "/etc/crowdsec/local_api_credentials.yaml" ] && [ ! -e "/etc/crowdsec/
         mkdir -p /etc/crowdsec/
         # if you change this, check that it still works
         # under alpine and k8s, with and without tls
-        rsync -av --ignore-existing /staging/etc/crowdsec/* /etc/crowdsec
+        cp -rn /staging/etc/crowdsec/* /etc/crowdsec
     fi
 fi
 
@@ -196,7 +191,7 @@ lapi_credentials_path=$(conf_get '.api.client.credentials_path')
 if isfalse "$DISABLE_LOCAL_API"; then
     # generate local agent credentials (even if agent is disabled, cscli needs a
     # connection to the API)
-    if ( isfalse "$USE_TLS" || [ "$CLIENT_CERT_FILE" = "" ] ); then
+    if isfalse "$USE_TLS" || [ -z "$CLIENT_CERT_FILE" ]; then
         if yq -e '.login==strenv(CUSTOM_HOSTNAME)' "$lapi_credentials_path" >/dev/null && ( cscli machines list -o json | yq -e 'any_c(.machineId==strenv(CUSTOM_HOSTNAME))' >/dev/null ); then
             echo "Local agent already registered"
         else
@@ -210,7 +205,7 @@ if isfalse "$DISABLE_LOCAL_API"; then
 
     echo "Check if lapi needs to register an additional agent"
     # pre-registration is not needed with TLS authentication, but we can have TLS transport with user/pw
-    if [ "$AGENT_USERNAME" != "" ] && [ "$AGENT_PASSWORD" != "" ] ; then
+    if [ -n "$AGENT_USERNAME" ] && [ -n "$AGENT_PASSWORD" ] ; then
         # re-register because pw may have been changed
         cscli machines add "$AGENT_USERNAME" --password "$AGENT_PASSWORD" -f /dev/null --force
         echo "Agent registered to lapi"
@@ -250,9 +245,9 @@ fi
 
 # registration to online API for signal push
 if isfalse "$DISABLE_LOCAL_API" && isfalse "$DISABLE_ONLINE_API" ; then
-    CONFIG_DIR=$(conf_get '.config_paths.config_dir')
+    CONFIG_DIR="$(conf_get '.config_paths.config_dir')"
     export CONFIG_DIR
-    config_exists=$(conf_get '.api.server.online_client | has("credentials_path")')
+    config_exists="$(conf_get '.api.server.online_client | has("credentials_path")')"
     if isfalse "$config_exists"; then
         conf_set '.api.server.online_client = {"credentials_path": strenv(CONFIG_DIR) + "/online_api_credentials.yaml"}'
         cscli capi register > "$CONFIG_DIR/online_api_credentials.yaml"
@@ -261,12 +256,12 @@ if isfalse "$DISABLE_LOCAL_API" && isfalse "$DISABLE_ONLINE_API" ; then
 fi
 
 # Enroll instance if enroll key is provided
-if isfalse "$DISABLE_LOCAL_API" && isfalse "$DISABLE_ONLINE_API" && [ "$ENROLL_KEY" != "" ]; then
+if isfalse "$DISABLE_LOCAL_API" && isfalse "$DISABLE_ONLINE_API" && [ -n "$ENROLL_KEY" ]; then
     enroll_args=""
-    if [ "$ENROLL_INSTANCE_NAME" != "" ]; then
+    if [ -n "$ENROLL_INSTANCE_NAME" ]; then
         enroll_args="--name $ENROLL_INSTANCE_NAME"
     fi
-    if [ "$ENROLL_TAGS" != "" ]; then
+    if [ -n "$ENROLL_TAGS" ]; then
         # shellcheck disable=SC2086
         for tag in ${ENROLL_TAGS}; do
             enroll_args="$enroll_args --tags $tag"
@@ -277,12 +272,11 @@ if isfalse "$DISABLE_LOCAL_API" && isfalse "$DISABLE_ONLINE_API" && [ "$ENROLL_K
 fi
 
 # crowdsec sqlite database permissions
-if [ "$GID" != "" ]; then
-    if istrue "$(conf_get '.db_config.type == "sqlite"')"; then
+if [ -n "$GID" ]; then
+    if istrue "$(conf_get '.db_config.type == "sqlite"')" && \
+            chgrp -f "$GID" "$(conf_get '.db_config.db_path')" 2>/dev/null; then
         # don't fail if the db is not there yet
-        chown -f ":$GID" "$(conf_get '.db_config.db_path')" 2>/dev/null \
-            && echo "sqlite database permissions updated" \
-            || true
+        echo "sqlite database permissions updated"
     fi
 fi
 
@@ -313,101 +307,91 @@ fi
 cscli_if_clean parsers install crowdsecurity/docker-logs
 cscli_if_clean parsers install crowdsecurity/cri-logs
 
-if [ "$COLLECTIONS" != "" ]; then
-    # shellcheck disable=SC2086
+if [ -n "$COLLECTIONS" ]; then
     cscli_if_clean collections install "$(difference "$COLLECTIONS" "$DISABLE_COLLECTIONS")"
 fi
 
-if [ "$PARSERS" != "" ]; then
-    # shellcheck disable=SC2086
+if [ -n "$PARSERS" ]; then
     cscli_if_clean parsers install "$(difference "$PARSERS" "$DISABLE_PARSERS")"
 fi
 
-if [ "$SCENARIOS" != "" ]; then
-    # shellcheck disable=SC2086
+if [ -n "$SCENARIOS" ]; then
     cscli_if_clean scenarios install "$(difference "$SCENARIOS" "$DISABLE_SCENARIOS")"
 fi
 
-if [ "$POSTOVERFLOWS" != "" ]; then
-    # shellcheck disable=SC2086
+if [ -n "$POSTOVERFLOWS" ]; then
     cscli_if_clean postoverflows install "$(difference "$POSTOVERFLOWS" "$DISABLE_POSTOVERFLOWS")"
 fi
 
-if [ "$CONTEXTS" != "" ]; then
-    # shellcheck disable=SC2086
+if [ -n "$CONTEXTS" ]; then
     cscli_if_clean contexts install "$(difference "$CONTEXTS" "$DISABLE_CONTEXTS")"
 fi
 
-if [ "$APPSEC_CONFIGS" != "" ]; then
-    # shellcheck disable=SC2086
+if [ -n "$APPSEC_CONFIGS" ]; then
     cscli_if_clean appsec-configs install "$(difference "$APPSEC_CONFIGS" "$DISABLE_APPSEC_CONFIGS")"
 fi
 
-if [ "$APPSEC_RULES" != "" ]; then
-    # shellcheck disable=SC2086
+if [ -n "$APPSEC_RULES" ]; then
     cscli_if_clean appsec-rules install "$(difference "$APPSEC_RULES" "$DISABLE_APPSEC_RULES")"
 fi
 
 ## Remove collections, parsers, scenarios & postoverflows
-if [ "$DISABLE_COLLECTIONS" != "" ]; then
-    # shellcheck disable=SC2086
+if [ -n "$DISABLE_COLLECTIONS" ]; then
     cscli_if_clean collections remove "$DISABLE_COLLECTIONS" --force
 fi
 
-if [ "$DISABLE_PARSERS" != "" ]; then
-    # shellcheck disable=SC2086
+if [ -n "$DISABLE_PARSERS" ]; then
     cscli_if_clean parsers remove "$DISABLE_PARSERS" --force
 fi
 
-if [ "$DISABLE_SCENARIOS" != "" ]; then
-    # shellcheck disable=SC2086
+if [ -n "$DISABLE_SCENARIOS" ]; then
     cscli_if_clean scenarios remove "$DISABLE_SCENARIOS" --force
 fi
 
-if [ "$DISABLE_POSTOVERFLOWS" != "" ]; then
-    # shellcheck disable=SC2086
+if [ -n "$DISABLE_POSTOVERFLOWS" ]; then
     cscli_if_clean postoverflows remove "$DISABLE_POSTOVERFLOWS" --force
 fi
 
-if [ "$DISABLE_CONTEXTS" != "" ]; then
-    # shellcheck disable=SC2086
+if [ -n "$DISABLE_CONTEXTS" ]; then
     cscli_if_clean contexts remove "$DISABLE_CONTEXTS" --force
 fi
 
-if [ "$DISABLE_APPSEC_CONFIGS" != "" ]; then
-    # shellcheck disable=SC2086
+if [ -n "$DISABLE_APPSEC_CONFIGS" ]; then
     cscli_if_clean appsec-configs remove "$DISABLE_APPSEC_CONFIGS" --force
 fi
 
-if [ "$DISABLE_APPSEC_RULES" != "" ]; then
-    # shellcheck disable=SC2086
+if [ -n "$DISABLE_APPSEC_RULES" ]; then
     cscli_if_clean appsec-rules remove "$DISABLE_APPSEC_RULES" --force
 fi
 
 ## Register bouncers via env
-for BOUNCER in $(compgen -A variable | grep -i BOUNCER_KEY); do
-    KEY=$(printf '%s' "${!BOUNCER}")
-    NAME=$(printf '%s' "$BOUNCER" | cut -d_  -f3-)
-    if [[ -n $KEY ]] && [[ -n $NAME ]]; then
+IFS='
+'
+for BOUNCER in $(set | sed -En 's/^XDG_([a-zA-Z0-9_]+=.+)/\1/p'); do
+    KEY="${BOUNCER#* }"
+    NAME="${BOUNCER% *}"
+    if [ -n "$KEY" ] && [ -n "$NAME" ]; then
         register_bouncer "$NAME" "$KEY"
     fi
 done
+unset IFS
 
-if [ "$ENABLE_CONSOLE_MANAGEMENT" != "" ]; then
-    # shellcheck disable=SC2086
+if [ -n "$ENABLE_CONSOLE_MANAGEMENT" ]; then
     cscli console enable console_management
 fi
 
 ## Register bouncers via secrets (Swarm only)
-shopt -s nullglob extglob
-for BOUNCER in /run/secrets/@(bouncer_key|BOUNCER_KEY)* ; do
+IFS='
+'
+# shellcheck disable=SC2044
+for BOUNCER in $(find /run/secrets -iname 'bouncer_key_*'); do
     KEY=$(cat "${BOUNCER}")
-    NAME=$(echo "${BOUNCER}" | awk -F "/" '{printf $NF}' | cut -d_  -f2-)
-    if [[ -n $KEY ]] && [[ -n $NAME ]]; then
+    NAME=$(basename "${BOUNCER}")
+    if [ -n "$KEY" ] && [ -n "$NAME" ]; then
         register_bouncer "$NAME" "$KEY"
     fi
 done
-shopt -u nullglob extglob
+unset IFS
 
 # set all options before validating the configuration
 
@@ -421,15 +405,15 @@ else
 fi
 
 ARGS=""
-if [ "$CONFIG_FILE" != "" ]; then
+if [ -n "$CONFIG_FILE" ]; then
     ARGS="-c $CONFIG_FILE"
 fi
 
-if [ "$DSN" != "" ]; then
+if [ -n "$DSN" ]; then
     ARGS="$ARGS -dsn ${DSN}"
 fi
 
-if [ "$TYPE" != "" ]; then
+if [ -n "$TYPE" ]; then
     ARGS="$ARGS -type $TYPE"
 fi
 
